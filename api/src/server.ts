@@ -10,7 +10,12 @@ import { z } from "zod";
 import type { PoolClient } from "pg";
 
 import { pool, withTenant } from "./db";
-import { requireAuth, allowRoles, signToken } from "./auth";
+
+import {
+  requireAuth,
+  allowRoles,
+  signToken,
+} from "./auth";
 
 // =====================================================
 // 1. APPLICATION CONFIGURATION
@@ -27,7 +32,9 @@ const FRONTEND_ORIGINS = (
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-// Validate environment variables
+// =====================================================
+// 2. ENVIRONMENT VALIDATION
+// =====================================================
 
 if (
   !process.env.DB_PASSWORD ||
@@ -39,6 +46,15 @@ if (
   );
 }
 
+if (
+  !process.env.JWT_SECRET ||
+  process.env.JWT_SECRET.length < 32
+) {
+  throw new Error(
+    "JWT_SECRET must be at least 32 characters"
+  );
+}
+
 console.log("WorkSphere Database Configuration:", {
   passwordLoaded: Boolean(process.env.DB_PASSWORD),
   database: process.env.DB_NAME,
@@ -46,7 +62,7 @@ console.log("WorkSphere Database Configuration:", {
 });
 
 // =====================================================
-// 2. MIDDLEWARE
+// 3. MIDDLEWARE
 // =====================================================
 
 app.use(helmet());
@@ -70,7 +86,7 @@ app.use(
 );
 
 // =====================================================
-// 3. HEALTH CHECK
+// 4. HEALTH CHECK
 // =====================================================
 
 const healthCheck = async (
@@ -101,7 +117,7 @@ app.get("/health", healthCheck);
 app.get("/api/health", healthCheck);
 
 // =====================================================
-// 4. AUTHENTICATION - REGISTER
+// 5. REGISTRATION VALIDATION
 // =====================================================
 
 const registerSchema = z.object({
@@ -110,6 +126,10 @@ const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(10).max(100),
 });
+
+// =====================================================
+// 6. ORGANIZATION REGISTRATION
+// =====================================================
 
 app.post(
   "/api/auth/register",
@@ -131,8 +151,7 @@ app.post(
 
       await client.query("BEGIN");
 
-      // Create organization / tenant
-
+      // Create tenant
       const tenantResult = await client.query(
         `INSERT INTO tenants (name)
          VALUES ($1)
@@ -143,14 +162,12 @@ app.post(
       const tenant = tenantResult.rows[0];
 
       // Hash password
-
       const hashedPassword = await bcrypt.hash(
         parsed.data.password,
         12
       );
 
       // Create organization owner
-
       const userResult = await client.query(
         `INSERT INTO users
          (tenant_id, name, email, password_hash, role)
@@ -168,11 +185,10 @@ app.post(
 
       await client.query("COMMIT");
 
-      // Generate JWT token
-
+      // Generate token
       const token = signToken({
-        userId: user.id,
-        tenantId: user.tenant_id,
+        userId: String(user.id),
+        tenantId: String(user.tenant_id),
         role: user.role,
         email: user.email,
       });
@@ -184,7 +200,6 @@ app.post(
         user,
         tenant,
       });
-
     } catch (error) {
       if (client) {
         await client.query("ROLLBACK").catch(() => {});
@@ -202,7 +217,6 @@ app.post(
       }
 
       return next(error);
-
     } finally {
       client?.release();
     }
@@ -210,13 +224,17 @@ app.post(
 );
 
 // =====================================================
-// 5. AUTHENTICATION - LOGIN
+// 7. LOGIN VALIDATION
 // =====================================================
 
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
+
+// =====================================================
+// 8. USER LOGIN
+// =====================================================
 
 app.post(
   "/api/auth/login",
@@ -248,8 +266,6 @@ app.post(
 
       const user = result.rows[0];
 
-      // Validate credentials
-
       if (
         !user ||
         !(await bcrypt.compare(
@@ -263,17 +279,14 @@ app.post(
         });
       }
 
-      // Generate token
-
       const token = signToken({
-        userId: user.id,
-        tenantId: user.tenant_id,
+        userId: String(user.id),
+        tenantId: String(user.tenant_id),
         role: user.role,
         email: user.email,
       });
 
       // Never return password hash
-
       delete user.password_hash;
 
       return res.status(200).json({
@@ -282,7 +295,6 @@ app.post(
         token,
         user,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -290,7 +302,7 @@ app.post(
 );
 
 // =====================================================
-// 6. CURRENT AUTHENTICATED USER
+// 9. CURRENT AUTHENTICATED USER
 // =====================================================
 
 app.get(
@@ -305,7 +317,7 @@ app.get(
 );
 
 // =====================================================
-// 7. PROJECT VALIDATION
+// 10. PROJECT VALIDATION
 // =====================================================
 
 const projectSchema = z.object({
@@ -315,7 +327,7 @@ const projectSchema = z.object({
 });
 
 // =====================================================
-// 8. GET ALL PROJECTS
+// 11. GET ALL PROJECTS
 // =====================================================
 
 app.get(
@@ -347,7 +359,6 @@ app.get(
         success: true,
         projects: result.rows,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -355,7 +366,7 @@ app.get(
 );
 
 // =====================================================
-// 9. CREATE PROJECT
+// 12. CREATE PROJECT
 // =====================================================
 
 app.post(
@@ -400,16 +411,12 @@ app.post(
 
           const newProject = result.rows[0];
 
-          // Record activity
-
           await client.query(
             `INSERT INTO activity_events
              (tenant_id, actor_id, entity_type, entity_id, action)
              VALUES ($1, $2, 'project', $3, 'created')`,
             [tenantId, userId, newProject.id]
           );
-
-          // Record audit log
 
           await client.query(
             `INSERT INTO audit_logs
@@ -427,7 +434,6 @@ app.post(
         message: "Project created successfully",
         project,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -435,7 +441,7 @@ app.post(
 );
 
 // =====================================================
-// 10. UPDATE PROJECT
+// 13. UPDATE PROJECT
 // =====================================================
 
 app.patch(
@@ -450,9 +456,12 @@ app.patch(
     const parsed = z.object({
       name: z.string().min(2).max(180).optional(),
       description: z.string().max(5000).optional(),
-      status: z
-        .enum(["active", "on_hold", "completed", "archived"])
-        .optional(),
+      status: z.enum([
+        "active",
+        "on_hold",
+        "completed",
+        "archived",
+      ]).optional(),
       dueDate: z.string().date().nullable().optional(),
     }).safeParse(req.body);
 
@@ -507,7 +516,6 @@ app.patch(
         message: "Project updated successfully",
         project: result.rows[0],
       });
-
     } catch (error) {
       return next(error);
     }
@@ -515,7 +523,7 @@ app.patch(
 );
 
 // =====================================================
-// 11. GET PROJECT TASKS
+// 14. GET PROJECT TASKS
 // =====================================================
 
 app.get(
@@ -542,7 +550,6 @@ app.get(
         success: true,
         tasks: result.rows,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -550,7 +557,7 @@ app.get(
 );
 
 // =====================================================
-// 12. CREATE PROJECT TASK
+// 15. CREATE TASK
 // =====================================================
 
 app.post(
@@ -560,9 +567,12 @@ app.post(
     const parsed = z.object({
       title: z.string().min(2).max(240),
       description: z.string().max(5000).optional(),
-      priority: z
-        .enum(["low", "medium", "high", "urgent"])
-        .optional(),
+      priority: z.enum([
+        "low",
+        "medium",
+        "high",
+        "urgent",
+      ]).optional(),
       assigneeId: z.string().uuid().nullable().optional(),
       dueDate: z.string().date().optional(),
     }).safeParse(req.body);
@@ -643,7 +653,6 @@ app.post(
         message: "Task created successfully",
         task,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -651,7 +660,7 @@ app.post(
 );
 
 // =====================================================
-// 13. UPDATE TASK
+// 16. UPDATE TASK
 // =====================================================
 
 app.patch(
@@ -660,12 +669,18 @@ app.patch(
   async (req, res, next) => {
     const parsed = z.object({
       title: z.string().min(2).max(240).optional(),
-      status: z
-        .enum(["todo", "in_progress", "blocked", "done"])
-        .optional(),
-      priority: z
-        .enum(["low", "medium", "high", "urgent"])
-        .optional(),
+      status: z.enum([
+        "todo",
+        "in_progress",
+        "blocked",
+        "done",
+      ]).optional(),
+      priority: z.enum([
+        "low",
+        "medium",
+        "high",
+        "urgent",
+      ]).optional(),
       assigneeId: z.string().uuid().nullable().optional(),
     }).safeParse(req.body);
 
@@ -720,7 +735,6 @@ app.patch(
         message: "Task updated successfully",
         task: result.rows[0],
       });
-
     } catch (error) {
       return next(error);
     }
@@ -728,7 +742,7 @@ app.patch(
 );
 
 // =====================================================
-// 14. ADD TASK COMMENT
+// 17. ADD TASK COMMENT
 // =====================================================
 
 app.post(
@@ -786,7 +800,6 @@ app.post(
         message: "Comment added successfully",
         comment,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -794,7 +807,7 @@ app.post(
 );
 
 // =====================================================
-// 15. GET ACTIVITY
+// 18. GET ACTIVITY
 // =====================================================
 
 app.get(
@@ -821,7 +834,6 @@ app.get(
         success: true,
         activity: result.rows,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -829,7 +841,7 @@ app.get(
 );
 
 // =====================================================
-// 16. GET AUDIT LOGS
+// 19. GET AUDIT LOGS
 // =====================================================
 
 app.get(
@@ -861,7 +873,6 @@ app.get(
         success: true,
         auditLogs: result.rows,
       });
-
     } catch (error) {
       return next(error);
     }
@@ -869,12 +880,12 @@ app.get(
 );
 
 // =====================================================
-// 17. GLOBAL ERROR HANDLER
+// 20. GLOBAL ERROR HANDLER
 // =====================================================
 
 app.use(
   (
-    error: any,
+    error: unknown,
     _req: express.Request,
     res: express.Response,
     _next: express.NextFunction
@@ -893,18 +904,14 @@ app.use(
 );
 
 // =====================================================
-// 18. START SERVER
+// 21. START SERVER
 // =====================================================
 
 async function startServer(): Promise<void> {
   try {
-    // Verify PostgreSQL connection
-
     await pool.query("SELECT 1");
 
     console.log("PostgreSQL connected successfully");
-
-    // Start Express server
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log("----------------------------------");
@@ -914,7 +921,6 @@ async function startServer(): Promise<void> {
       console.log(`Health: http://localhost:${PORT}/health`);
       console.log("----------------------------------");
     });
-
   } catch (error) {
     console.error("DATABASE CONNECTION ERROR:", error);
     process.exit(1);
@@ -922,7 +928,7 @@ async function startServer(): Promise<void> {
 }
 
 // =====================================================
-// 19. INITIALIZE APPLICATION
+// 22. INITIALIZE APPLICATION
 // =====================================================
 
-startServer();
+void startServer();
