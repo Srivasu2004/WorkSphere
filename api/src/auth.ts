@@ -26,7 +26,28 @@ export const authenticate = async (req, res, next) => {
         return res.status(401).json({
             message: "Unauthorized"
         });
+      
     }
 
     return next();
+  import { Request, Response, NextFunction } from "express";
+
+export const authenticateToken = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  try {
+    // Your authentication logic
+
+    next();
+    return;
+  } catch (error) {
+    res.status(401).json({
+      message: "Authentication failed"
+    });
+    return;
+  }
+};
+  
 };
