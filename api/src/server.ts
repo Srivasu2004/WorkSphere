@@ -83,6 +83,23 @@ app.get("/health", async (_req, res) => {
     });
   }
 });
+app.get("/api/example", async (req, res) => {
+  try {
+    const result = await someFunction();
+
+    return res.status(200).json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error"
+    });
+  }
+});
 app.get("/api/test", async (req, res) => {
     if (!req.body.name) {
         return res.status(400).json({ error: "Name required" });
