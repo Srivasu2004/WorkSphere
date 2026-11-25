@@ -83,6 +83,23 @@ app.get("/health", async (_req, res) => {
     });
   }
 });
+app.get("/api/test", async (req, res) => {
+    try {
+        const result = await pool.query("SELECT NOW()");
+
+        return res.json({
+            success: true,
+            data: result.rows
+        });
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error"
+        });
+    }
+});
 
 app.get("/api/health", async (_req, res) => {
   try {
