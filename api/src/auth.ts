@@ -33,6 +33,23 @@ export const authenticate = (
 
     next();
 };
+import { Request, Response, NextFunction } from "express";
+
+export const authenticate = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  if (!req.headers.authorization) {
+    res.status(401).json({
+      success: false,
+      message: "Unauthorized"
+    });
+    return;
+  }
+
+  next();
+};
 
   import { Request, Response, NextFunction } from "express";
 
