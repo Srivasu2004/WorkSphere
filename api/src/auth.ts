@@ -102,7 +102,15 @@ export function requireAuth(
     const decoded = jwt.verify(token, getSecret(), {
       issuer: "worksphere",
       algorithms: ["HS256"],
-    }) as AuthUser;
+    });
+
+    if (typeof decoded === "string" || !decoded) {
+      res.status(401).json({
+        success: false,
+        error: "Invalid authentication token",
+      });
+      return;
+    }
 
     const validRoles: Role[] = [
       "platform_admin",
@@ -113,11 +121,11 @@ export function requireAuth(
     ];
 
     if (
-      !decoded ||
       typeof decoded.userId !== "string" ||
       typeof decoded.tenantId !== "string" ||
       typeof decoded.email !== "string" ||
-      !validRoles.includes(decoded.role)
+      typeof decoded.role !== "string" ||
+      !validRoles.includes(decoded.role as Role)
     ) {
       res.status(401).json({
         success: false,
@@ -126,7 +134,13 @@ export function requireAuth(
       return;
     }
 
-    req.user = decoded;
+    req.user = {
+      userId: decoded.userId,
+      tenantId: decoded.tenantId,
+      email: decoded.email,
+      role: decoded.role as Role,
+    };
+
     next();
   } catch {
     res.status(401).json({
