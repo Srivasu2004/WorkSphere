@@ -84,6 +84,17 @@ app.get("/health", async (_req, res) => {
   }
 });
 app.get("/api/test", async (req, res) => {
+    if (!req.body.name) {
+        return res.status(400).json({ error: "Name required" });
+    }
+
+    await someFunction();
+
+    return res.status(200).json({
+        success: true
+    });
+});
+app.get("/api/test", async (req, res) => {
     try {
         const result = await pool.query("SELECT NOW()");
 
