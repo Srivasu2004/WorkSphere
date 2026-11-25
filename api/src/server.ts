@@ -130,38 +130,32 @@ const registerSchema = z.object({
 // =====================================================
 // 6. ORGANIZATION REGISTRATION
 // =====================================================
+
+// =====================================================
+// 6. ORGANIZATION REGISTRATION
+// =====================================================
+
 app.post(
   "/api/auth/register",
   async (req, res, next) => {
     let client: PoolClient | undefined;
 
     try {
+      // Validate request
+      const parsed = registerSchema.safeParse(req.body);
+
+      if (!parsed.success) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid registration details",
+          details: parsed.error.flatten(),
+        });
+      }
+
+      // Connect to PostgreSQL
       client = await pool.connect();
 
       await client.query("BEGIN");
-
-      // Registration logic goes here
-
-      await client.query("COMMIT");
-
-      return res.status(201).json({
-        success: true,
-        message: "Registration successful",
-      });
-
-    } catch (error) {
-      if (client) {
-        await client.query("ROLLBACK").catch(() => {});
-      }
-
-      return next(error);
-
-    } finally {
-      client?.release();
-    }
-  }
-);
-
 
       // Create tenant
       const tenantResult = await client.query(
@@ -195,9 +189,10 @@ app.post(
 
       const user = userResult.rows[0];
 
+      // Commit transaction
       await client.query("COMMIT");
 
-      // Generate token
+      // Generate JWT token
       const token = signToken({
         userId: String(user.id),
         tenantId: String(user.tenant_id),
@@ -212,6 +207,7 @@ app.post(
         user,
         tenant,
       });
+
     } catch (error) {
       if (client) {
         await client.query("ROLLBACK").catch(() => {});
@@ -229,12 +225,14 @@ app.post(
       }
 
       return next(error);
+
     } finally {
       client?.release();
     }
   }
 );
 
+      
 // =====================================================
 // 7. LOGIN VALIDATION
 // =====================================================
