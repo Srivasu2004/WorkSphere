@@ -94,23 +94,13 @@ app.get("/api/test", async (req, res) => {
         success: true
     });
 });
-app.get("/api/test", async (req, res) => {
-    try {
-        const result = await pool.query("SELECT NOW()");
+catch (error) {
+    console.error(error);
 
-        return res.json({
-            success: true,
-            data: result.rows
-        });
-    } catch (error) {
-        console.error(error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Internal server error"
-        });
-    }
-});
+    return res.status(500).json({
+        error: "Internal server error"
+    });
+}
 
 app.get("/api/health", async (_req, res) => {
   try {
