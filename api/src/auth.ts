@@ -7,7 +7,10 @@ import type {
 
 import jwt from "jsonwebtoken";
 
-// 1. User roles
+// =====================================================
+// 1. USER ROLES
+// =====================================================
+
 export type Role =
   | "platform_admin"
   | "organization_owner"
@@ -15,7 +18,10 @@ export type Role =
   | "team_member"
   | "auditor";
 
-// 2. Authenticated user
+// =====================================================
+// 2. AUTHENTICATED USER
+// =====================================================
+
 export interface AuthUser {
   userId: string;
   tenantId: string;
@@ -23,7 +29,10 @@ export interface AuthUser {
   email: string;
 }
 
-// 3. Extend Express Request
+// =====================================================
+// 3. EXPRESS REQUEST EXTENSION
+// =====================================================
+
 declare global {
   namespace Express {
     interface Request {
@@ -32,7 +41,10 @@ declare global {
   }
 }
 
-// 4. Validate JWT secret
+// =====================================================
+// 4. JWT SECRET VALIDATION
+// =====================================================
+
 const getSecret = (): string => {
   const value = process.env.JWT_SECRET;
 
@@ -45,7 +57,10 @@ const getSecret = (): string => {
   return value;
 };
 
-// 5. Generate JWT token
+// =====================================================
+// 5. GENERATE JWT TOKEN
+// =====================================================
+
 export function signToken(user: AuthUser): string {
   return jwt.sign(user, getSecret(), {
     expiresIn: "30m",
@@ -54,7 +69,10 @@ export function signToken(user: AuthUser): string {
   });
 }
 
-// 6. Authenticate requests
+// =====================================================
+// 6. AUTHENTICATION MIDDLEWARE
+// =====================================================
+
 export function requireAuth(
   req: Request,
   res: Response,
@@ -86,19 +104,20 @@ export function requireAuth(
       algorithms: ["HS256"],
     }) as AuthUser;
 
-    // Validate required JWT fields
+    const validRoles: Role[] = [
+      "platform_admin",
+      "organization_owner",
+      "project_manager",
+      "team_member",
+      "auditor",
+    ];
+
     if (
       !decoded ||
       typeof decoded.userId !== "string" ||
       typeof decoded.tenantId !== "string" ||
       typeof decoded.email !== "string" ||
-      ![
-        "platform_admin",
-        "organization_owner",
-        "project_manager",
-        "team_member",
-        "auditor",
-      ].includes(decoded.role)
+      !validRoles.includes(decoded.role)
     ) {
       res.status(401).json({
         success: false,
@@ -117,7 +136,10 @@ export function requireAuth(
   }
 }
 
-// 7. Role-based authorization
+// =====================================================
+// 7. ROLE-BASED AUTHORIZATION
+// =====================================================
+
 export function allowRoles(...roles: Role[]) {
   return (
     req: Request,
