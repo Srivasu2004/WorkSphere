@@ -139,6 +139,19 @@ app.post("/api/auth/register", async (req, res, next) => {
       details: parsed.error.flatten(),
     });
   }
+  app.post("/register", async (req, res): Promise<void> => {
+  if (!req.body.email) {
+    res.status(400).json({
+      message: "Email required"
+    });
+    return;
+  }
+
+  res.status(201).json({
+    message: "Registered successfully"
+  });
+  return;
+});
 
   let client;
 
