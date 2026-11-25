@@ -21,15 +21,19 @@ export function allowRoles(...roles:Role[]) {
     next();
   };
 }
-export const authenticate = async (req, res, next) => {
+export const authenticate = (
+    req: Request,
+    res: Response,
+    next: NextFunction
+): void => {
     if (!req.headers.authorization) {
-        return res.status(401).json({
-            message: "Unauthorized"
-        });
-      
+        res.status(401).json({ error: "Unauthorized" });
+        return;
     }
 
-    return next();
+    next();
+};
+
   import { Request, Response, NextFunction } from "express";
 
 export const authenticateToken = (
