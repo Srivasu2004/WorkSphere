@@ -1,3 +1,4 @@
+
 import "dotenv/config";
 
 import express from "express";
@@ -6,22 +7,27 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
+import type { PoolClient } from "pg";
 
 import { pool, withTenant } from "./db";
 import { requireAuth, allowRoles, signToken } from "./auth";
 
-// ==========================================
-// CONFIGURATION
-// ==========================================
+// =====================================================
+// 1. APPLICATION CONFIGURATION
+// =====================================================
 
 const app = express();
+
 const PORT = Number(process.env.API_PORT || 4000);
 
-console.log("Database environment test:", {
-  passwordLoaded: Boolean(process.env.DB_PASSWORD),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-});
+const FRONTEND_ORIGINS = (
+  process.env.FRONTEND_ORIGIN || "http://localhost:3000"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+// Validate environment variables
 
 if (
   !process.env.DB_PASSWORD ||
@@ -33,17 +39,21 @@ if (
   );
 }
 
-// ==========================================
-// MIDDLEWARE
-// ==========================================
+console.log("WorkSphere Database Configuration:", {
+  passwordLoaded: Boolean(process.env.DB_PASSWORD),
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+});
+
+// =====================================================
+// 2. MIDDLEWARE
+// =====================================================
 
 app.use(helmet());
 
 app.use(
   cors({
-    origin: (
-      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
-    ).split(","),
+    origin: FRONTEND_ORIGINS,
     credentials: true,
   })
 );
@@ -52,22 +62,25 @@ app.use(express.json({ limit: "1mb" }));
 
 app.use(
   rateLimit({
-    windowMs: 60_000,
+    windowMs: 60 * 1000,
     limit: 120,
     standardHeaders: true,
     legacyHeaders: false,
   })
 );
 
-// ==========================================
-// HEALTH CHECK
-// ==========================================
+// =====================================================
+// 3. HEALTH CHECK
+// =====================================================
 
-app.get("/health", async (_req, res) => {
+const healthCheck = async (
+  _req: express.Request,
+  res: express.Response
+) => {
   try {
     await pool.query("SELECT 1");
 
-    res.json({
+    return res.status(200).json({
       success: true,
       status: "ok",
       service: "worksphere-api",
@@ -76,69 +89,20 @@ app.get("/health", async (_req, res) => {
   } catch (error) {
     console.error("Health check error:", error);
 
-    res.status(503).json({
+    return res.status(503).json({
       success: false,
       status: "unavailable",
+      database: "disconnected",
     });
   }
-});
-app.get("/api/example", async (req, res) => {
-  try {
-    const result = await someFunction();
+};
 
-    return res.status(200).json({
-      success: true,
-      data: result
-    });
-  } catch (error) {
-    console.error(error);
+app.get("/health", healthCheck);
+app.get("/api/health", healthCheck);
 
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
-  }
-});
-app.get("/api/test", async (req, res) => {
-    if (!req.body.name) {
-        return res.status(400).json({ error: "Name required" });
-    }
-
-    await someFunction();
-
-    return res.status(200).json({
-        success: true
-    });
-});
-catch (error) {
-    console.error(error);
-
-    return res.status(500).json({
-        error: "Internal server error"
-    });
-}
-
-app.get("/api/health", async (_req, res) => {
-  try {
-    await pool.query("SELECT 1");
-
-    res.json({
-      success: true,
-      message: "WorkSphere API and PostgreSQL connected",
-    });
-  } catch (error) {
-    console.error("Database health check:", error);
-
-    res.status(503).json({
-      success: false,
-      message: "Database connection failed",
-    });
-  }
-});
-
-// ==========================================
-// AUTHENTICATION - REGISTER
-// ==========================================
+// =====================================================
+// 4. AUTHENTICATION - REGISTER
+// =====================================================
 
 const registerSchema = z.object({
   organizationName: z.string().min(2).max(120),
@@ -147,176 +111,202 @@ const registerSchema = z.object({
   password: z.string().min(10).max(100),
 });
 
-app.post("/api/auth/register", async (req, res, next) => {
-  const parsed = registerSchema.safeParse(req.body);
+app.post(
+  "/api/auth/register",
+  async (req, res, next) => {
+    const parsed = registerSchema.safeParse(req.body);
 
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: "Invalid registration data",
-      details: parsed.error.flatten(),
-    });
-  }
-  app.post("/register", async (req, res): Promise<void> => {
-  if (!req.body.email) {
-    res.status(400).json({
-      message: "Email required"
-    });
-    return;
-  }
-
-  res.status(201).json({
-    message: "Registered successfully"
-  });
-  return;
-});
-
-  let client;
-
-  try {
-    client = await pool.connect();
-
-    await client.query("BEGIN");
-
-    const tenantResult = await client.query(
-      `INSERT INTO tenants(name)
-       VALUES($1)
-       RETURNING id, name`,
-      [parsed.data.organizationName]
-    );
-
-    const tenant = tenantResult.rows[0];
-
-    const hashedPassword = await bcrypt.hash(
-      parsed.data.password,
-      12
-    );
-
-    const userResult = await client.query(
-      `INSERT INTO users
-       (tenant_id, name, email, password_hash, role)
-       VALUES($1, $2, lower($3), $4, 'organization_owner')
-       RETURNING id, name, email, role, tenant_id`,
-      [
-        tenant.id,
-        parsed.data.name,
-        parsed.data.email,
-        hashedPassword,
-      ]
-    );
-
-    const user = userResult.rows[0];
-
-    await client.query("COMMIT");
-
-    const token = signToken({
-      userId: user.id,
-      tenantId: user.tenant_id,
-      role: user.role,
-      email: user.email,
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "Registration successful",
-      token,
-      user,
-      tenant,
-    });
-  } catch (error: any) {
-    if (client) {
-      await client.query("ROLLBACK").catch(() => {});
-    }
-
-    console.error("Registration error:", error);
-
-    if (error.code === "23505") {
-      return res.status(409).json({
-        error: "Email already registered",
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid registration data",
+        details: parsed.error.flatten(),
       });
     }
 
-    return next(error);
-  } finally {
-    client?.release();
-  }
-});
+    let client: PoolClient | undefined;
 
-// ==========================================
-// AUTHENTICATION - LOGIN
-// ==========================================
+    try {
+      client = await pool.connect();
 
-app.post("/api/auth/login", async (req, res, next) => {
-  const parsed = z
-    .object({
-      email: z.string().email(),
-      password: z.string().min(1),
-    })
-    .safeParse(req.body);
+      await client.query("BEGIN");
 
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: "Email and password are required",
-    });
-  }
+      // Create organization / tenant
 
-  try {
-    const result = await pool.query(
-      `SELECT id, tenant_id, name, email, password_hash, role
-       FROM users
-       WHERE email = lower($1)
-       ORDER BY created_at
-       LIMIT 1`,
-      [parsed.data.email]
-    );
+      const tenantResult = await client.query(
+        `INSERT INTO tenants (name)
+         VALUES ($1)
+         RETURNING id, name`,
+        [parsed.data.organizationName]
+      );
 
-    const user = result.rows[0];
+      const tenant = tenantResult.rows[0];
 
-    if (
-      !user ||
-      !(await bcrypt.compare(
+      // Hash password
+
+      const hashedPassword = await bcrypt.hash(
         parsed.data.password,
-        user.password_hash
-      ))
-    ) {
-      return res.status(401).json({
-        error: "Invalid email or password",
+        12
+      );
+
+      // Create organization owner
+
+      const userResult = await client.query(
+        `INSERT INTO users
+         (tenant_id, name, email, password_hash, role)
+         VALUES ($1, $2, lower($3), $4, 'organization_owner')
+         RETURNING id, name, email, role, tenant_id`,
+        [
+          tenant.id,
+          parsed.data.name,
+          parsed.data.email,
+          hashedPassword,
+        ]
+      );
+
+      const user = userResult.rows[0];
+
+      await client.query("COMMIT");
+
+      // Generate JWT token
+
+      const token = signToken({
+        userId: user.id,
+        tenantId: user.tenant_id,
+        role: user.role,
+        email: user.email,
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "Registration successful",
+        token,
+        user,
+        tenant,
+      });
+
+    } catch (error) {
+      if (client) {
+        await client.query("ROLLBACK").catch(() => {});
+      }
+
+      console.error("Registration error:", error);
+
+      const dbError = error as { code?: string };
+
+      if (dbError.code === "23505") {
+        return res.status(409).json({
+          success: false,
+          error: "Email already registered",
+        });
+      }
+
+      return next(error);
+
+    } finally {
+      client?.release();
+    }
+  }
+);
+
+// =====================================================
+// 5. AUTHENTICATION - LOGIN
+// =====================================================
+
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+app.post(
+  "/api/auth/login",
+  async (req, res, next) => {
+    const parsed = loginSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: "Email and password are required",
       });
     }
 
-    const token = signToken({
-      userId: user.id,
-      tenantId: user.tenant_id,
-      role: user.role,
-      email: user.email,
-    });
+    try {
+      const result = await pool.query(
+        `SELECT
+           id,
+           tenant_id,
+           name,
+           email,
+           password_hash,
+           role
+         FROM users
+         WHERE email = lower($1)
+         ORDER BY created_at
+         LIMIT 1`,
+        [parsed.data.email]
+      );
 
-    delete user.password_hash;
+      const user = result.rows[0];
 
-    return res.json({
-      success: true,
-      message: "Login successful",
-      token,
-      user,
-    });
-  } catch (error) {
-    next(error);
+      // Validate credentials
+
+      if (
+        !user ||
+        !(await bcrypt.compare(
+          parsed.data.password,
+          user.password_hash
+        ))
+      ) {
+        return res.status(401).json({
+          success: false,
+          error: "Invalid email or password",
+        });
+      }
+
+      // Generate token
+
+      const token = signToken({
+        userId: user.id,
+        tenantId: user.tenant_id,
+        role: user.role,
+        email: user.email,
+      });
+
+      // Never return password hash
+
+      delete user.password_hash;
+
+      return res.status(200).json({
+        success: true,
+        message: "Login successful",
+        token,
+        user,
+      });
+
+    } catch (error) {
+      return next(error);
+    }
   }
-});
+);
 
-// ==========================================
-// CURRENT AUTHENTICATED USER
-// ==========================================
+// =====================================================
+// 6. CURRENT AUTHENTICATED USER
+// =====================================================
 
-app.get("/api/auth/me", requireAuth, (req, res) => {
-  res.json({
-    success: true,
-    user: req.user,
-  });
-});
+app.get(
+  "/api/auth/me",
+  requireAuth,
+  (req, res) => {
+    return res.status(200).json({
+      success: true,
+      user: req.user,
+    });
+  }
+);
 
-// ==========================================
-// PROJECTS
-// ==========================================
+// =====================================================
+// 7. PROJECT VALIDATION
+// =====================================================
 
 const projectSchema = z.object({
   name: z.string().min(2).max(180),
@@ -324,33 +314,49 @@ const projectSchema = z.object({
   dueDate: z.string().date().optional(),
 });
 
-// GET PROJECTS
+// =====================================================
+// 8. GET ALL PROJECTS
+// =====================================================
 
-app.get("/api/projects", requireAuth, async (req, res, next) => {
-  try {
-    const tenantId = req.user!.tenantId;
+app.get(
+  "/api/projects",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const tenantId = req.user!.tenantId;
 
-    const result = await withTenant(tenantId, (client) =>
-      client.query(
-        `SELECT p.*, COUNT(t.id)::int AS task_count
-         FROM projects p
-         LEFT JOIN tasks t
-           ON t.project_id = p.id
-           AND t.tenant_id = p.tenant_id
-         WHERE p.tenant_id = $1
-         GROUP BY p.id
-         ORDER BY p.created_at DESC`,
-        [tenantId]
-      )
-    );
+      const result = await withTenant(
+        tenantId,
+        (client) =>
+          client.query(
+            `SELECT
+               p.*,
+               COUNT(t.id)::int AS task_count
+             FROM projects p
+             LEFT JOIN tasks t
+               ON t.project_id = p.id
+               AND t.tenant_id = p.tenant_id
+             WHERE p.tenant_id = $1
+             GROUP BY p.id
+             ORDER BY p.created_at DESC`,
+            [tenantId]
+          )
+      );
 
-    res.json(result.rows);
-  } catch (error) {
-    next(error);
+      return res.status(200).json({
+        success: true,
+        projects: result.rows,
+      });
+
+    } catch (error) {
+      return next(error);
+    }
   }
-});
+);
 
-// CREATE PROJECT
+// =====================================================
+// 9. CREATE PROJECT
+// =====================================================
 
 app.post(
   "/api/projects",
@@ -365,6 +371,7 @@ app.post(
 
     if (!parsed.success) {
       return res.status(400).json({
+        success: false,
         error: "Invalid project",
         details: parsed.error.flatten(),
       });
@@ -372,49 +379,64 @@ app.post(
 
     try {
       const tenantId = req.user!.tenantId;
+      const userId = req.user!.userId;
 
-      const row = await withTenant(tenantId, async (client) => {
-        const result = await client.query(
-          `INSERT INTO projects
-           (tenant_id, name, description, owner_id, due_date)
-           VALUES($1, $2, $3, $4, $5)
-           RETURNING *`,
-          [
-            tenantId,
-            parsed.data.name,
-            parsed.data.description || "",
-            req.user!.userId,
-            parsed.data.dueDate || null,
-          ]
-        );
+      const project = await withTenant(
+        tenantId,
+        async (client) => {
+          const result = await client.query(
+            `INSERT INTO projects
+             (tenant_id, name, description, owner_id, due_date)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *`,
+            [
+              tenantId,
+              parsed.data.name,
+              parsed.data.description || "",
+              userId,
+              parsed.data.dueDate || null,
+            ]
+          );
 
-        const project = result.rows[0];
+          const newProject = result.rows[0];
 
-        await client.query(
-          `INSERT INTO activity_events
-           (tenant_id, actor_id, entity_type, entity_id, action)
-           VALUES($1, $2, 'project', $3, 'created')`,
-          [tenantId, req.user!.userId, project.id]
-        );
+          // Record activity
 
-        await client.query(
-          `INSERT INTO audit_logs
-           (tenant_id, actor_id, action, entity_type, entity_id)
-           VALUES($1, $2, 'project.created', 'project', $3)`,
-          [tenantId, req.user!.userId, project.id]
-        );
+          await client.query(
+            `INSERT INTO activity_events
+             (tenant_id, actor_id, entity_type, entity_id, action)
+             VALUES ($1, $2, 'project', $3, 'created')`,
+            [tenantId, userId, newProject.id]
+          );
 
-        return project;
+          // Record audit log
+
+          await client.query(
+            `INSERT INTO audit_logs
+             (tenant_id, actor_id, action, entity_type, entity_id)
+             VALUES ($1, $2, 'project.created', 'project', $3)`,
+            [tenantId, userId, newProject.id]
+          );
+
+          return newProject;
+        }
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Project created successfully",
+        project,
       });
 
-      res.status(201).json(row);
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 );
 
-// UPDATE PROJECT
+// =====================================================
+// 10. UPDATE PROJECT
+// =====================================================
 
 app.patch(
   "/api/projects/:id",
@@ -425,69 +447,76 @@ app.patch(
     "platform_admin"
   ),
   async (req, res, next) => {
-    const parsed = z
-      .object({
-        name: z.string().min(2).max(180).optional(),
-        description: z.string().max(5000).optional(),
-        status: z
-          .enum(["active", "on_hold", "completed", "archived"])
-          .optional(),
-        dueDate: z.string().date().nullable().optional(),
-      })
-      .safeParse(req.body);
+    const parsed = z.object({
+      name: z.string().min(2).max(180).optional(),
+      description: z.string().max(5000).optional(),
+      status: z
+        .enum(["active", "on_hold", "completed", "archived"])
+        .optional(),
+      dueDate: z.string().date().nullable().optional(),
+    }).safeParse(req.body);
 
     if (!parsed.success) {
       return res.status(400).json({
+        success: false,
         error: "Invalid project update",
+        details: parsed.error.flatten(),
       });
     }
 
     try {
       const tenantId = req.user!.tenantId;
 
-      const result = await withTenant(tenantId, (client) =>
-        client.query(
-          `UPDATE projects
-           SET name = COALESCE($3, name),
-               description = COALESCE($4, description),
-               status = COALESCE($5, status),
-               due_date = CASE
-                 WHEN $6::boolean THEN $7::date
-                 ELSE due_date
-               END,
-               updated_at = now()
-           WHERE id = $1 AND tenant_id = $2
-           RETURNING *`,
-          [
-            req.params.id,
-            tenantId,
-            parsed.data.name ?? null,
-            parsed.data.description ?? null,
-            parsed.data.status ?? null,
-            parsed.data.dueDate !== undefined,
-            parsed.data.dueDate ?? null,
-          ]
-        )
+      const result = await withTenant(
+        tenantId,
+        (client) =>
+          client.query(
+            `UPDATE projects
+             SET name = COALESCE($3, name),
+                 description = COALESCE($4, description),
+                 status = COALESCE($5, status),
+                 due_date = CASE
+                   WHEN $6::boolean THEN $7::date
+                   ELSE due_date
+                 END,
+                 updated_at = NOW()
+             WHERE id = $1
+               AND tenant_id = $2
+             RETURNING *`,
+            [
+              req.params.id,
+              tenantId,
+              parsed.data.name ?? null,
+              parsed.data.description ?? null,
+              parsed.data.status ?? null,
+              parsed.data.dueDate !== undefined,
+              parsed.data.dueDate ?? null,
+            ]
+          )
       );
 
       if (!result.rows[0]) {
         return res.status(404).json({
+          success: false,
           error: "Project not found",
         });
       }
 
-      res.json(result.rows[0]);
+      return res.status(200).json({
+        success: true,
+        message: "Project updated successfully",
+        project: result.rows[0],
+      });
+
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 );
 
-// ==========================================
-// PROJECT TASKS
-// ==========================================
-
-// GET TASKS
+// =====================================================
+// 11. GET PROJECT TASKS
+// =====================================================
 
 app.get(
   "/api/projects/:projectId/tasks",
@@ -496,43 +525,51 @@ app.get(
     try {
       const tenantId = req.user!.tenantId;
 
-      const result = await withTenant(tenantId, (client) =>
-        client.query(
-          `SELECT *
-           FROM tasks
-           WHERE tenant_id = $1 AND project_id = $2
-           ORDER BY created_at DESC`,
-          [tenantId, req.params.projectId]
-        )
+      const result = await withTenant(
+        tenantId,
+        (client) =>
+          client.query(
+            `SELECT *
+             FROM tasks
+             WHERE tenant_id = $1
+               AND project_id = $2
+             ORDER BY created_at DESC`,
+            [tenantId, req.params.projectId]
+          )
       );
 
-      res.json(result.rows);
+      return res.status(200).json({
+        success: true,
+        tasks: result.rows,
+      });
+
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 );
 
-// CREATE TASK
+// =====================================================
+// 12. CREATE PROJECT TASK
+// =====================================================
 
 app.post(
   "/api/projects/:projectId/tasks",
   requireAuth,
   async (req, res, next) => {
-    const parsed = z
-      .object({
-        title: z.string().min(2).max(240),
-        description: z.string().max(5000).optional(),
-        priority: z
-          .enum(["low", "medium", "high", "urgent"])
-          .optional(),
-        assigneeId: z.string().uuid().nullable().optional(),
-        dueDate: z.string().date().optional(),
-      })
-      .safeParse(req.body);
+    const parsed = z.object({
+      title: z.string().min(2).max(240),
+      description: z.string().max(5000).optional(),
+      priority: z
+        .enum(["low", "medium", "high", "urgent"])
+        .optional(),
+      assigneeId: z.string().uuid().nullable().optional(),
+      dueDate: z.string().date().optional(),
+    }).safeParse(req.body);
 
     if (!parsed.success) {
       return res.status(400).json({
+        success: false,
         error: "Invalid task",
         details: parsed.error.flatten(),
       });
@@ -540,59 +577,88 @@ app.post(
 
     try {
       const tenantId = req.user!.tenantId;
+      const userId = req.user!.userId;
 
-      const row = await withTenant(tenantId, async (client) => {
-        const result = await client.query(
-          `INSERT INTO tasks
-           (tenant_id, project_id, title, description,
-            priority, assignee_id, due_date)
-           SELECT $1, id, $3, $4, $5, $6, $7
-           FROM projects
-           WHERE id = $2 AND tenant_id = $1
-           RETURNING *`,
-          [
-            tenantId,
-            req.params.projectId,
-            parsed.data.title,
-            parsed.data.description || "",
-            parsed.data.priority || "medium",
-            parsed.data.assigneeId || null,
-            parsed.data.dueDate || null,
-          ]
-        );
-
-        if (result.rowCount) {
-          await client.query(
-            `INSERT INTO activity_events
-             (tenant_id, actor_id, entity_type, entity_id, action)
-             VALUES($1, $2, 'task', $3, 'created')`,
-            [tenantId, req.user!.userId, result.rows[0].id]
+      const task = await withTenant(
+        tenantId,
+        async (client) => {
+          const result = await client.query(
+            `INSERT INTO tasks
+             (
+               tenant_id,
+               project_id,
+               title,
+               description,
+               priority,
+               assignee_id,
+               due_date
+             )
+             SELECT
+               $1,
+               id,
+               $3,
+               $4,
+               $5,
+               $6,
+               $7
+             FROM projects
+             WHERE id = $2
+               AND tenant_id = $1
+             RETURNING *`,
+            [
+              tenantId,
+              req.params.projectId,
+              parsed.data.title,
+              parsed.data.description || "",
+              parsed.data.priority || "medium",
+              parsed.data.assigneeId || null,
+              parsed.data.dueDate || null,
+            ]
           );
+
+          const newTask = result.rows[0];
+
+          if (newTask) {
+            await client.query(
+              `INSERT INTO activity_events
+               (tenant_id, actor_id, entity_type, entity_id, action)
+               VALUES ($1, $2, 'task', $3, 'created')`,
+              [tenantId, userId, newTask.id]
+            );
+          }
+
+          return newTask;
         }
+      );
 
-        return result.rows[0];
-      });
-
-      if (!row) {
+      if (!task) {
         return res.status(404).json({
+          success: false,
           error: "Project not found",
         });
       }
 
-      res.status(201).json(row);
+      return res.status(201).json({
+        success: true,
+        message: "Task created successfully",
+        task,
+      });
+
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 );
 
-// ==========================================
-// UPDATE TASK
-// ==========================================
+// =====================================================
+// 13. UPDATE TASK
+// =====================================================
 
-app.patch("/api/tasks/:id", requireAuth, async (req, res, next) => {
-  const parsed = z
-    .object({
+app.patch(
+  "/api/tasks/:id",
+  requireAuth,
+  async (req, res, next) => {
+    const parsed = z.object({
       title: z.string().min(2).max(240).optional(),
       status: z
         .enum(["todo", "in_progress", "blocked", "done"])
@@ -601,164 +667,210 @@ app.patch("/api/tasks/:id", requireAuth, async (req, res, next) => {
         .enum(["low", "medium", "high", "urgent"])
         .optional(),
       assigneeId: z.string().uuid().nullable().optional(),
-    })
-    .safeParse(req.body);
+    }).safeParse(req.body);
 
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: "Invalid task update",
-    });
-  }
-
-  try {
-    const tenantId = req.user!.tenantId;
-
-    const result = await withTenant(tenantId, (client) =>
-      client.query(
-        `UPDATE tasks
-         SET title = COALESCE($3, title),
-             status = COALESCE($4, status),
-             priority = COALESCE($5, priority),
-             assignee_id = COALESCE($6, assignee_id),
-             updated_at = now()
-         WHERE id = $1 AND tenant_id = $2
-         RETURNING *`,
-        [
-          req.params.id,
-          tenantId,
-          parsed.data.title ?? null,
-          parsed.data.status ?? null,
-          parsed.data.priority ?? null,
-          parsed.data.assigneeId ?? null,
-        ]
-      )
-    );
-
-    if (!result.rows[0]) {
-      return res.status(404).json({
-        error: "Task not found",
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid task update",
+        details: parsed.error.flatten(),
       });
     }
 
-    res.json(result.rows[0]);
-  } catch (error) {
-    next(error);
-  }
-});
+    try {
+      const tenantId = req.user!.tenantId;
 
-// ==========================================
-// TASK COMMENTS
-// ==========================================
+      const result = await withTenant(
+        tenantId,
+        (client) =>
+          client.query(
+            `UPDATE tasks
+             SET title = COALESCE($3, title),
+                 status = COALESCE($4, status),
+                 priority = COALESCE($5, priority),
+                 assignee_id = CASE
+                   WHEN $6::boolean THEN $7::uuid
+                   ELSE assignee_id
+                 END,
+                 updated_at = NOW()
+             WHERE id = $1
+               AND tenant_id = $2
+             RETURNING *`,
+            [
+              req.params.id,
+              tenantId,
+              parsed.data.title ?? null,
+              parsed.data.status ?? null,
+              parsed.data.priority ?? null,
+              parsed.data.assigneeId !== undefined,
+              parsed.data.assigneeId ?? null,
+            ]
+          )
+      );
+
+      if (!result.rows[0]) {
+        return res.status(404).json({
+          success: false,
+          error: "Task not found",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Task updated successfully",
+        task: result.rows[0],
+      });
+
+    } catch (error) {
+      return next(error);
+    }
+  }
+);
+
+// =====================================================
+// 14. ADD TASK COMMENT
+// =====================================================
 
 app.post(
   "/api/tasks/:id/comments",
   requireAuth,
   async (req, res, next) => {
-    const parsed = z
-      .object({
-        body: z.string().min(1).max(5000),
-      })
-      .safeParse(req.body);
+    const parsed = z.object({
+      body: z.string().min(1).max(5000),
+    }).safeParse(req.body);
 
     if (!parsed.success) {
       return res.status(400).json({
+        success: false,
         error: "Invalid comment",
+        details: parsed.error.flatten(),
       });
     }
 
     try {
       const tenantId = req.user!.tenantId;
+      const userId = req.user!.userId;
 
-      const row = await withTenant(tenantId, async (client) => {
-        const result = await client.query(
-          `INSERT INTO comments
-           (tenant_id, task_id, author_id, body)
-           SELECT $1, t.id, $3, $4
-           FROM tasks t
-           WHERE t.id = $2 AND t.tenant_id = $1
-           RETURNING *`,
-          [
-            tenantId,
-            req.params.id,
-            req.user!.userId,
-            parsed.data.body,
-          ]
-        );
+      const comment = await withTenant(
+        tenantId,
+        async (client) => {
+          const result = await client.query(
+            `INSERT INTO comments
+             (tenant_id, task_id, author_id, body)
+             SELECT $1, t.id, $3, $4
+             FROM tasks t
+             WHERE t.id = $2
+               AND t.tenant_id = $1
+             RETURNING *`,
+            [
+              tenantId,
+              req.params.id,
+              userId,
+              parsed.data.body,
+            ]
+          );
 
-        return result.rows[0];
-      });
+          return result.rows[0];
+        }
+      );
 
-      if (!row) {
+      if (!comment) {
         return res.status(404).json({
+          success: false,
           error: "Task not found",
         });
       }
 
-      res.status(201).json(row);
+      return res.status(201).json({
+        success: true,
+        message: "Comment added successfully",
+        comment,
+      });
+
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 );
 
-// ==========================================
-// ACTIVITY
-// ==========================================
-
-app.get("/api/activity", requireAuth, async (req, res, next) => {
-  try {
-    const tenantId = req.user!.tenantId;
-
-    const result = await withTenant(tenantId, (client) =>
-      client.query(
-        `SELECT *
-         FROM activity_events
-         WHERE tenant_id = $1
-         ORDER BY created_at DESC
-         LIMIT 100`,
-        [tenantId]
-      )
-    );
-
-    res.json(result.rows);
-  } catch (error) {
-    next(error);
-  }
-});
-
-// ==========================================
-// AUDIT LOGS
-// ==========================================
+// =====================================================
+// 15. GET ACTIVITY
+// =====================================================
 
 app.get(
-  "/api/audit",
+  "/api/activity",
   requireAuth,
-  allowRoles("organization_owner", "auditor", "platform_admin"),
   async (req, res, next) => {
     try {
       const tenantId = req.user!.tenantId;
 
-      const result = await withTenant(tenantId, (client) =>
-        client.query(
-          `SELECT *
-           FROM audit_logs
-           WHERE tenant_id = $1
-           ORDER BY created_at DESC
-           LIMIT 200`,
-          [tenantId]
-        )
+      const result = await withTenant(
+        tenantId,
+        (client) =>
+          client.query(
+            `SELECT *
+             FROM activity_events
+             WHERE tenant_id = $1
+             ORDER BY created_at DESC
+             LIMIT 100`,
+            [tenantId]
+          )
       );
 
-      res.json(result.rows);
+      return res.status(200).json({
+        success: true,
+        activity: result.rows,
+      });
+
     } catch (error) {
-      next(error);
+      return next(error);
     }
   }
 );
 
-// ==========================================
-// GLOBAL ERROR HANDLER
-// ==========================================
+// =====================================================
+// 16. GET AUDIT LOGS
+// =====================================================
+
+app.get(
+  "/api/audit",
+  requireAuth,
+  allowRoles(
+    "organization_owner",
+    "auditor",
+    "platform_admin"
+  ),
+  async (req, res, next) => {
+    try {
+      const tenantId = req.user!.tenantId;
+
+      const result = await withTenant(
+        tenantId,
+        (client) =>
+          client.query(
+            `SELECT *
+             FROM audit_logs
+             WHERE tenant_id = $1
+             ORDER BY created_at DESC
+             LIMIT 200`,
+            [tenantId]
+          )
+      );
+
+      return res.status(200).json({
+        success: true,
+        auditLogs: result.rows,
+      });
+
+    } catch (error) {
+      return next(error);
+    }
+  }
+);
+
+// =====================================================
+// 17. GLOBAL ERROR HANDLER
+// =====================================================
 
 app.use(
   (
@@ -773,22 +885,26 @@ app.use(
       return;
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: "Internal server error",
     });
   }
 );
 
-// ==========================================
-// START SERVER
-// ==========================================
+// =====================================================
+// 18. START SERVER
+// =====================================================
 
-async function startServer() {
+async function startServer(): Promise<void> {
   try {
+    // Verify PostgreSQL connection
+
     await pool.query("SELECT 1");
 
     console.log("PostgreSQL connected successfully");
+
+    // Start Express server
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log("----------------------------------");
@@ -798,10 +914,15 @@ async function startServer() {
       console.log(`Health: http://localhost:${PORT}/health`);
       console.log("----------------------------------");
     });
+
   } catch (error) {
     console.error("DATABASE CONNECTION ERROR:", error);
     process.exit(1);
   }
 }
+
+// =====================================================
+// 19. INITIALIZE APPLICATION
+// =====================================================
 
 startServer();
