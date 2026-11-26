@@ -45,17 +45,17 @@ declare global {
 // 4. JWT SECRET VALIDATION
 // =====================================================
 
-const getSecret = (): string => {
-  const value = process.env.JWT_SECRET;
+function getSecret(): string {
+  const secret = process.env.JWT_SECRET;
 
-  if (!value || value.length < 32) {
+  if (!secret || secret.length < 32) {
     throw new Error(
       "JWT_SECRET must be at least 32 characters"
     );
   }
 
-  return value;
-};
+  return secret;
+}
 
 // =====================================================
 // 5. GENERATE JWT TOKEN
